@@ -1,0 +1,5 @@
+directories:
+  model: assets/models/Okulo.oemf
+  icons:
+    config editor: assets/icons/config_editor.png
+    model generator: assets/icons/model_generator.png

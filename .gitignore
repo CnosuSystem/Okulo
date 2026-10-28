@@ -1,0 +1,32 @@
+# Python virtual environments
+**/.venv/
+**/venv/
+
+# Python cache and compiled files
+**/pycache/
+*.py[cod]
+
+# Tool caches
+**/.ruff_cache/
+
+# Work-in-progress assets
+**/.wip-assets/
+
+# Aseprite files
+*.aseprite
+
+# PyInstaller build artifacts
+*.spec
+/build/
+/dist/
+
+# Inno Setup build output
+/Output/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Work-In-Progress Assets
+/wip-assets/
