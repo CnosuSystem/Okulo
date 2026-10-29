@@ -1,6 +1,8 @@
 # Copyright Cnosu System 2026. GPLv3 license, see the LICENSE.md file.
 
 from pathlib import Path
+
+import yaml
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
@@ -8,7 +10,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QVBoxLayout,
 )
-import yaml
 
 
 class ModelGenerator(QDialog):
@@ -22,9 +23,11 @@ class ModelGenerator(QDialog):
             with config_path.open("r", encoding="utf-8") as file:
                 config = yaml.safe_load(file) or {}
 
-            icon_path = config.get("directories", {}).get(
-                "icons", {}
-            ).get("model generator", "")
+            icon_path = (
+                config.get("directories", {})
+                .get("icons", {})
+                .get("model generator", "")
+            )
 
             if icon_path:
                 self.setWindowIcon(QIcon(str(root_dir / icon_path)))
@@ -49,7 +52,7 @@ class ModelGenerator(QDialog):
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
 
         description = QLabel(
-            "Create, configure, and export .oef character models. I'll make it work next update I promise."
+            "Create, configure, and export .oef character models. Next update, I swear, I swear."
         )
         description.setWordWrap(True)
 

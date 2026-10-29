@@ -22,6 +22,15 @@ git clone https://github.com/CnosuSystem/Okulo.git
 cd Okulo
 ```
 
+You can also download a specific version using:
+
+```powershell
+git clone --branch [VERSION] https://github.com/CnosuSystem/Okulo.git
+cd Okulo
+```
+
+Where you replace [VERSION] with the tag of the specific version you want.
+
 If you don't have Git, simply download the raw source .zip file from GitHub and put it in your preffered directory. Then open it in the terminal.
 
 ### 2. Set up the virtual enviroment

@@ -29,7 +29,7 @@ def load_model(model_path):
     """Load setup.yaml and the idle GIF from a ZIP-based model archive."""
 
     # Check if the model even exists
-    if not MODEL_PATH.is_file():
+    if not model_path.is_file():
         raise FileNotFoundError(f"Model archive not found: {MODEL_PATH}")
 
     with zipfile.ZipFile(model_path, "r") as archive:
@@ -96,11 +96,60 @@ def load_model(model_path):
 
         gif_data = archive.read(gif_path)
 
-    return setup, gif_data
+        # Sleep is optional. If the section is absent, it is disabled.
+        anim_config = setup.get("anim", {})
+        sleep_config = anim_config.get("sleep", {})
+
+        if not isinstance(sleep_config, dict):
+            sleep_config = {}
+
+        sleep_enabled = sleep_config.get("enabled", False) is True
+        sleep_gif_data = None
+
+        # Do not inspect the sleep path or wait setting unless enabled.
+        if sleep_enabled:
+            sleep_path = sleep_config.get("directory", "")
+
+            if not isinstance(sleep_path, str) or not sleep_path:
+                raise ValueError(
+                    "Sleep is enabled, but anim.sleep.directory is missing."
+                )
+
+            relative_sleep_path = PurePosixPath(sleep_path)
+
+            if relative_sleep_path.is_absolute() or ".." in relative_sleep_path.parts:
+                raise ValueError(f"Invalid sleep animation path: {sleep_path}")
+
+            sleep_candidates = [relative_sleep_path]
+
+            # Allow the same resources fallback used for idle.
+            sleep_candidates.extend(
+                [
+                    PurePosixPath("resources") / relative_sleep_path.name,
+                ]
+            )
+
+            sleep_gif_path = next(
+                (
+                    path.as_posix()
+                    for path in sleep_candidates
+                    if path.as_posix() in files
+                    and not path.is_absolute()
+                    and ".." not in path.parts
+                ),
+                None,
+            )
+
+            if sleep_gif_path is None:
+                raise FileNotFoundError(f"Sleep animation not found: {sleep_path}")
+
+            sleep_gif_data = archive.read(sleep_gif_path)
+
+    return setup, gif_data, sleep_gif_data
 
 
 # Load the model once, keeping the GIF bytes in memory.
-setup, idle_gif_data = load_model(MODEL_PATH)
+setup, idle_gif_data, sleep_gif_data = load_model(MODEL_PATH)
 
 
 class Entity(QWidget):
@@ -131,9 +180,25 @@ class Entity(QWidget):
         self.bob_time = 0.0
         self.bob_speed = float(bob_config["speed"])
         self.bob_height = float(bob_config["height"])
+        self.shadow_enabled = bool(shadow_config["enabled"])
         self.shadow_height = int(shadow_config["height"])
 
         self.top_padding = int(self.bob_height) + 2
+
+        anim_config = setup.get("anim", {})
+        sleep_config = anim_config.get("sleep", {})
+
+        if not isinstance(sleep_config, dict):
+            sleep_config = {}
+
+        self.sleep_enabled = sleep_config.get("enabled", False) is True
+
+        self.sleep_wait = (
+            float(sleep_config.get("wait", 60)) if self.sleep_enabled else None
+        )
+
+        if self.sleep_enabled and self.sleep_wait < 0:
+            raise ValueError("Sleep wait cannot be negative.")
 
         # -------------------------
         # Load GIF from memory
@@ -149,10 +214,37 @@ class Entity(QWidget):
 
         self.movie = QMovie(self.gif_buffer, QByteArray(b"gif"), self)
 
+        self.idle_movie = self.movie
+
         if not self.movie.isValid():
             raise RuntimeError(
                 f"Qt could not load the idle animation from {MODEL_PATH}"
             )
+
+        self.sleep_movie = None
+        self.sleep_buffer = None
+
+        self.sleep_timer = None
+
+        if self.sleep_enabled:
+            self.sleep_buffer = QBuffer(self)
+            self.sleep_buffer.setData(QByteArray(sleep_gif_data))
+
+            if not self.sleep_buffer.open(QIODevice.OpenModeFlag.ReadOnly):
+                raise RuntimeError("Could not open the sleep GIF buffer.")
+
+            self.sleep_movie = QMovie(
+                self.sleep_buffer,
+                QByteArray(b"gif"),
+                self,
+            )
+
+            if not self.sleep_movie.isValid():
+                raise RuntimeError("Qt could not load the sleep GIF.")
+
+            self.sleep_movie.setScaledSize(QSize(self.sprite_size, self.sprite_size))
+
+            self.sleep_movie.frameChanged.connect(self.update)
 
         self.movie.setScaledSize(QSize(self.sprite_size, self.sprite_size))
 
@@ -183,6 +275,15 @@ class Entity(QWidget):
 
         self.movie.frameChanged.connect(self.update)
         self.movie.start()
+
+        # Start the sleep countdown only when sleep is enabled.
+        if self.sleep_enabled:
+            self.sleep_timer = QTimer(self)
+            self.sleep_timer.setSingleShot(True)
+            self.sleep_timer.timeout.connect(self.start_sleep)
+
+            # Configuration is in seconds; QTimer expects milliseconds.
+            self.sleep_timer.start(round(self.sleep_wait * 1000))
 
         # -------------------------
         # Start bobbing animation
@@ -249,6 +350,38 @@ class Entity(QWidget):
         self.bob_time += self.bob_speed
         self.update()
 
+    def start_sleep(self):
+        """Switch from idle to sleep after the configured wait."""
+
+        if not self.sleep_enabled or self.sleep_movie is None:
+            return
+
+        if self.movie is self.sleep_movie:
+            return
+
+        self.movie.stop()
+        self.movie = self.sleep_movie
+        self.movie.start()
+        self.update()
+
+    def wake_up(self):
+        """Wake the sprite and restart its sleep countdown."""
+
+        if self.sleep_enabled and self.sleep_timer is not None:
+            self.sleep_timer.stop()
+
+        # Already using idle? Just reset the countdown.
+        if self.movie is not self.idle_movie:
+            self.movie.stop()
+            self.movie = self.idle_movie
+            self.movie.start()
+
+        # Start a fresh countdown only if sleep is enabled.
+        if self.sleep_enabled and self.sleep_timer is not None:
+            self.sleep_timer.start(round(self.sleep_wait * 1000))
+
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
 
@@ -260,7 +393,8 @@ class Entity(QWidget):
         sprite_y = self.top_padding + bob_offset
 
         # Draw the shadow first so the sprite appears in front of it.
-        self.draw_shadow(painter, bob_offset)
+        if self.shadow_enabled:
+            self.draw_shadow(painter, bob_offset)
 
         # Draw the current GIF frame.
         frame = self.movie.currentPixmap()
@@ -299,6 +433,8 @@ class Entity(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self.wake_up()
+
             self.drag_position = (
                 event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             )
@@ -327,6 +463,8 @@ class Entity(QWidget):
             self.drag_position is not None
             and event.buttons() & Qt.MouseButton.LeftButton
         ):
+            self.wake_up()
+
             self.move(event.globalPosition().toPoint() - self.drag_position)
             event.accept()
 
@@ -335,9 +473,15 @@ class Entity(QWidget):
             self.drag_position = None
 
     def reload_config(self):
-        """Reload config.yaml, the model setup, and its idle animation."""
+        """Reload settings and animations without partially applying changes."""
 
-        global config, setup, idle_gif_data, MODEL_PATH
+        global config, setup, idle_gif_data, sleep_gif_data, MODEL_PATH
+
+        new_buffer = None
+        new_movie = None
+        new_sleep_buffer = None
+        new_sleep_movie = None
+        new_sleep_timer = None
 
         try:
             # Read the latest application configuration.
@@ -359,8 +503,8 @@ class Entity(QWidget):
 
             new_model_path = (ROOT_DIR / model_value).resolve()
 
-            # Load and validate the new model before changing the current one.
-            new_setup, new_gif_data = load_model(new_model_path)
+            # Load the model and its optional sleep animation.
+            new_setup, new_gif_data, new_sleep_gif_data = load_model(new_model_path)
 
             sprite = new_setup["sprite"]
             bob = sprite["bob"]
@@ -369,67 +513,140 @@ class Entity(QWidget):
             new_sprite_size = int(sprite["size"])
             new_bob_speed = float(bob["speed"])
             new_bob_height = float(bob["height"])
+            new_shadow_enabled = bool(shadow["enabled"])
             new_shadow_height = int(shadow["height"])
 
             if new_sprite_size <= 0:
                 raise ValueError("Sprite size must be greater than zero.")
-
             if new_bob_height < 0:
                 raise ValueError("Bob height cannot be negative.")
-
             if new_shadow_height < 0:
                 raise ValueError("Shadow height cannot be negative.")
+            if new_bob_speed < 0:
+                raise ValueError("Bob speed cannot be negative.")
 
-            # Create the replacement animation and buffer first.
+            # Read sleep settings. Missing section means disabled.
+            anim = new_setup.get("anim", {})
+            sleep_config = anim.get("sleep", {})
+
+            if not isinstance(sleep_config, dict):
+                sleep_config = {}
+
+            new_sleep_enabled = sleep_config.get("enabled", False) is True
+
+            new_sleep_wait = (
+                float(sleep_config.get("wait", 60)) if new_sleep_enabled else None
+            )
+
+            if new_sleep_enabled and new_sleep_wait < 0:
+                raise ValueError("Sleep wait cannot be negative.")
+
+            if new_sleep_enabled and new_sleep_gif_data is None:
+                raise ValueError("Sleep is enabled, but no sleep animation was loaded.")
+
+            # Build the new idle animation.
             new_buffer = QBuffer(self)
             new_buffer.setData(QByteArray(new_gif_data))
 
             if not new_buffer.open(QIODevice.OpenModeFlag.ReadOnly):
-                new_buffer.deleteLater()
-                raise RuntimeError("Could not open the new GIF data.")
+                raise RuntimeError("Could not open the new idle GIF buffer.")
 
             new_movie = QMovie(new_buffer, QByteArray(b"gif"), self)
 
             if not new_movie.isValid():
-                new_buffer.close()
-                new_buffer.deleteLater()
-                new_movie.deleteLater()
-                raise RuntimeError("Qt could not load the new GIF.")
+                raise RuntimeError("Qt could not load the new idle GIF.")
 
             new_movie.setScaledSize(QSize(new_sprite_size, new_sprite_size))
 
-            # Swap the animation only after the new one is valid.
-            old_movie = self.movie
-            old_buffer = self.gif_buffer
+            # Build the sleep animation only when enabled.
+            if new_sleep_enabled:
+                new_sleep_buffer = QBuffer(self)
+                new_sleep_buffer.setData(QByteArray(new_sleep_gif_data))
 
-            old_movie.stop()
+                if not new_sleep_buffer.open(QIODevice.OpenModeFlag.ReadOnly):
+                    raise RuntimeError("Could not open the new sleep GIF buffer.")
 
-            self.movie = new_movie
-            self.gif_buffer = new_buffer
+                new_sleep_movie = QMovie(
+                    new_sleep_buffer,
+                    QByteArray(b"gif"),
+                    self,
+                )
 
-            old_movie.deleteLater()
-            old_buffer.close()
-            old_buffer.deleteLater()
+                if not new_sleep_movie.isValid():
+                    raise RuntimeError("Qt could not load the new sleep GIF.")
 
-            # Apply the new settings.
+                new_sleep_movie.setScaledSize(QSize(new_sprite_size, new_sprite_size))
+                new_sleep_movie.frameChanged.connect(self.update)
+
+                # Prepare the new countdown before changing the current state.
+                new_sleep_timer = QTimer(self)
+                new_sleep_timer.setSingleShot(True)
+                new_sleep_timer.timeout.connect(self.start_sleep)
+
+            # Connect the idle animation.
+            new_movie.frameChanged.connect(self.update)
+
+            # All new resources are valid. Now replace the old ones.
+            old_movies = (self.movie, self.sleep_movie)
+            old_buffers = (self.gif_buffer, self.sleep_buffer)
+            old_timer = self.sleep_timer
+
+            if old_timer is not None:
+                old_timer.stop()
+
+            for movie in old_movies:
+                if movie is not None:
+                    movie.stop()
+
+            # Commit the new configuration.
             config = new_config
             setup = new_setup
             idle_gif_data = new_gif_data
+            sleep_gif_data = new_sleep_gif_data
             MODEL_PATH = new_model_path
 
             self.sprite_size = new_sprite_size
             self.bob_speed = new_bob_speed
             self.bob_height = new_bob_height
+            self.shadow_enabled = new_shadow_enabled
             self.shadow_height = new_shadow_height
             self.top_padding = int(self.bob_height) + 2
+
+            self.sleep_enabled = new_sleep_enabled
+            self.sleep_wait = new_sleep_wait
+
+            self.gif_buffer = new_buffer
+            self.idle_movie = new_movie
+            self.sleep_buffer = new_sleep_buffer
+            self.sleep_movie = new_sleep_movie
+            self.sleep_timer = new_sleep_timer
+
+            # Idle is always the starting animation after a reload.
+            self.movie = self.idle_movie
 
             self.resize(
                 self.sprite_size,
                 self.sprite_size + self.top_padding + self.shadow_height,
             )
 
-            self.movie.frameChanged.connect(self.update)
-            self.movie.start()
+            self.idle_movie.start()
+
+            if self.sleep_enabled:
+                self.sleep_timer.start(round(self.sleep_wait * 1000))
+
+            # Release old resources after the replacement is running.
+            if old_timer is not None:
+                old_timer.deleteLater()
+
+            for movie in old_movies:
+                if movie is not None:
+                    movie.deleteLater()
+
+            for buffer in old_buffers:
+                if buffer is not None:
+                    buffer.close()
+                    buffer.deleteLater()
+
             self.update()
 
         except (
@@ -441,6 +658,21 @@ class Entity(QWidget):
             zipfile.BadZipFile,
             RuntimeError,
         ) as error:
+            # Dispose of any replacement resources created before failure.
+            if new_sleep_timer is not None:
+                new_sleep_timer.stop()
+                new_sleep_timer.deleteLater()
+
+            for movie in (new_movie, new_sleep_movie):
+                if movie is not None:
+                    movie.stop()
+                    movie.deleteLater()
+
+            for buffer in (new_buffer, new_sleep_buffer):
+                if buffer is not None:
+                    buffer.close()
+                    buffer.deleteLater()
+
             QMessageBox.critical(
                 self,
                 "Reload Failed",

@@ -142,7 +142,7 @@ class ConfigEditor(QDialog):
 
             icons = directories.get("icons", {})
             icon_path = icons.get("config editor", "")
-                
+
             if icon_path:
                 self.setWindowIcon(QIcon(str(ROOT_DIR / icon_path)))
 

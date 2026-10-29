@@ -1,6 +1,6 @@
 
 #define MyAppName "Okulo"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "Cnosu System"
 #define MyAppExeName "Okulo.exe"
 #define MyAppId "{{7F3A2D91-8C64-4E5B-A217-9D6F0B82C431}"
